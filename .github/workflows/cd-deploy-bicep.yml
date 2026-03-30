@@ -13,13 +13,10 @@ on:
     branches:
       - development
       - MS/feature/infra
-    paths:
-      - 'infra/**'
   pull_request:
     branches:
       - development
-    paths:
-      - 'infra/**'
+
 
 jobs:
   bicep:
