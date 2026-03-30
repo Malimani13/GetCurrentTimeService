@@ -1,0 +1,55 @@
+name: Bicep Deployment dev #TODO: change the name of the workflow
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+  security-events: write
+  actions: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - development
+      - MS/feature/infra
+    paths:
+      - 'infra/**'
+  pull_request:
+    branches:
+      - development
+    paths:
+      - 'infra/**'
+
+jobs:
+  bicep:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Run what-if for pull request
+        if: github.event_name == 'pull_request'
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az deployment group what-if \
+              --resource-group <your-resource-group-name> \
+              --template-file infra/main.bicep \
+              --parameters @infra/main.parameters.json
+
+      - name: Deploy Bicep template
+        if: github.event_name != 'pull_request'
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az deployment group create \
+              --resource-group <your-resource-group-name> \
+              --template-file infra/main.bicep \
+              --parameters @infra/main.parameters.json
