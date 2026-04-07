@@ -1,60 +1,128 @@
 name: Build, Test, Deploy
 
+permissions:
+  contents: read
+  id-token: write
+
 on:
   workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Environment to deploy to"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prod
+
   push:
     branches:
       - main
 
 jobs:
+  resolve-environment:
+    name: Resolve environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.vars.outputs.environment }}
+    steps:
+      - name: Resolve deployment target
+        id: vars
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ inputs.target_environment }}"
+          else
+            ENV="dev"
+          fi
+
+          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
+
   build-and-test:
     name: Build & Test .NET 8
     runs-on: ubuntu-latest
+    needs: resolve-environment
 
     steps:
-      # Checks out the repository code onto the runner so subsequent
-      # steps can access the source files.
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Installs the exact .NET 8 SDK version on the runner.
-      # Required since ubuntu-latest does not ship with .NET 8 by default.
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      # Downloads all NuGet packages defined in the project files.
-      # Separated from build so dependency resolution errors are reported clearly.
       - name: Restore dependencies
         run: dotnet restore
 
-      # Compiles the solution in Release mode.
-      # --no-restore skips a redundant restore since the previous step already did it.
       - name: Build
         run: dotnet build --no-restore --configuration Release
 
-      # Runs all unit tests in the solution.
-      # --no-build reuses the binaries from the build step above, saving time.
       - name: Run tests
         run: dotnet test --no-build --configuration Release --verbosity normal
 
-      # Publishes the Function App as a self-contained deployment package
-      # into the ./publish folder, ready to be picked up by a deploy job.
       - name: Publish Function App
         run: |
           dotnet publish GetCurrentTimeService/GetCurrentTimeService.csproj \
-              --no-restore \
-              --configuration Release \
-              --output ./publish
+            --no-restore \
+            --configuration Release \
+            --output ./publish
 
-      # Uploads the published output as a workflow artifact.
-      # This allows the CD workflow to download and deploy it without rebuilding.
-      # Retention is kept short (1 day) since artifacts are only needed for
-      # the immediately following deploy job.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: function-app
+          name: function-app-${{ github.sha }}
           path: ./publish
           retention-days: 1
+
+  deploy-infra:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: resolve-environment
+    environment: ${{ needs.resolve-environment.outputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Bicep
+        uses: azure/bicep-deploy@v2
+        with:
+          type: deployment
+          operation: create
+          scope: resourceGroup
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          resource-group-name: ${{ vars.RESOURCE_GROUP_NAME }}
+          template-file: ./infra/main.bicep
+          parameters-file: ${{ vars.PARAMETERS_FILE }}
+
+  deploy:
+    name: Deploy Azure Function App
+    runs-on: ubuntu-latest
+    needs:
+      - resolve-environment
+      - build-and-test
+      - deploy-infra
+    environment: ${{ needs.resolve-environment.outputs.environment }}
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: function-app-${{ github.sha }}
+          path: ./publish
+
+      - name: Deploy to Azure Function App
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.FUNCTION_APP_NAME }}
+          package: ./publish
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
