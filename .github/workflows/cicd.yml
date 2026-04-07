@@ -14,7 +14,7 @@ on:
         type: choice
         options:
           - dev
-          - prod
+          - Production
 
   push:
     branches:
